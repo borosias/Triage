@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Flamingo",
-  description: "Flamingo project foundation",
+  description: "Flamingo team triage application",
 };
 
 export default function RootLayout({

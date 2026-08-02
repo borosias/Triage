@@ -9,11 +9,13 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postinstall": "prisma generate",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "seed": "prisma db seed",
-    "seed:verify": "tsx prisma/verify-seed.ts"
+    "seed:verify": "tsx prisma/verify-seed.ts",
+    "session:verify": "node scripts/verify-session.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.9.1",
