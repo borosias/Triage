@@ -11,7 +11,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed": "prisma db seed",
+    "seed:verify": "tsx prisma/verify-seed.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.9.1",
