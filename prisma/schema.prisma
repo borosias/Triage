@@ -1,0 +1,67 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum WorkspaceRole {
+  OWNER
+  MEMBER
+  VIEWER
+}
+
+enum ItemStatus {
+  OPEN
+  RESOLVED
+}
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  workspaceMemberships WorkspaceMembership[]
+  claimedItems         Item[]                @relation("ItemClaimedBy")
+  resolvedItems        Item[]                @relation("ItemResolvedBy")
+}
+
+model Workspace {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  memberships WorkspaceMembership[]
+  items       Item[]
+}
+
+model WorkspaceMembership {
+  workspaceId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        WorkspaceRole
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, userId])
+}
+
+model Item {
+  id           String     @id @default(uuid()) @db.Uuid
+  workspaceId  String     @db.Uuid
+  title        String
+  status       ItemStatus @default(OPEN)
+  claimedById  String?    @db.Uuid
+  claimedAt    DateTime?  @db.Timestamptz(6)
+  resolvedById String?    @db.Uuid
+  resolvedAt   DateTime?  @db.Timestamptz(6)
+  createdAt    DateTime   @default(now()) @db.Timestamptz(6)
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  claimedBy  User?     @relation("ItemClaimedBy", fields: [claimedById], references: [id], onDelete: Restrict)
+  resolvedBy User?     @relation("ItemResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, status])
+}

@@ -15,7 +15,17 @@ Copy-Item .env.example .env.local
 npm run dev
 ```
 
-Set `DATABASE_URL` in `.env.local` before importing the server environment module or running database commands.
+Configure both URLs in `.env.local`:
+
+- `DATABASE_URL`: the Supabase transaction pooler URL used by the serverless application runtime.
+- `DIRECT_URL`: the Supabase direct database URL used by Prisma migrations. If the direct IPv6 endpoint is unavailable locally, use the Supabase session pooler URL instead.
+
+Generate the Prisma Client and apply committed migrations:
+
+```powershell
+npx prisma generate
+npx prisma migrate deploy
+```
 
 ## Verification
 
