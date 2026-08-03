@@ -16,7 +16,8 @@
     "seed": "prisma db seed",
     "seed:verify": "tsx prisma/verify-seed.ts",
     "session:verify": "node scripts/verify-session.mjs",
-    "r2:verify": "node scripts/verify-r2.mjs"
+    "r2:verify": "node scripts/verify-r2.mjs",
+    "r1:verify": "node scripts/verify-r1.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.9.1",

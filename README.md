@@ -1,6 +1,7 @@
 # Flamingo
 
-Minimal Epic 0 foundation for the Flamingo Home Assignment.
+Flamingo Home Assignment implementation with atomic item claiming and sealed
+workspace reads and claim writes.
 
 ## Requirements
 
@@ -55,13 +56,22 @@ With the development server running on port 3000, verify the session flow with:
 npm run session:verify
 ```
 
-## Workspace-scoped queue reads
+## Workspace-scoped queue reads and claims
 
 Authenticated users can list only workspaces where they have a database-backed
 membership. Selecting one loads up to 50 newest `OPEN` items from that workspace,
 including both claimed and unclaimed items. `OWNER`, `MEMBER`, and `VIEWER` can
 all read. A request for a workspace without membership returns `404`, and every
 item query includes the requested workspace ID in its database predicate.
+
+`OWNER` and `MEMBER` may claim an unclaimed `OPEN` item. `VIEWER` cannot claim,
+and item IDs cannot cross workspace boundaries. Claiming uses one conditional
+PostgreSQL `UPDATE ... RETURNING`; the item, workspace, state, unclaimed check,
+membership, and write-capable role are all part of that mutation predicate.
+
+The queue waits for the claim response before changing the claimant. A `200`
+response displays the confirmed claimant, while a concurrent `409` immediately
+reconciles the row to the canonical claimant returned by the server.
 
 With the development server running on port 3000, verify the R2 read contracts
 and seeded visibility matrix with:
@@ -70,7 +80,25 @@ and seeded visibility matrix with:
 npm run r2:verify
 ```
 
-This slice does not add claim, release, resolve, or other write authorization.
+The verifier covers both queue reads and adversarial claim writes, including
+`OWNER`, `MEMBER`, `VIEWER`, non-member, and mismatched workspace/item-ID cases.
+
+## Concurrent claim verification
+
+With the development server running on port 3000, run:
+
+```powershell
+npm run r1:verify
+```
+
+The verifier obtains a real seeded item through HTTP, resets only that item to
+an unclaimed `OPEN` state, establishes Alice and Bob sessions, sends both claim
+requests concurrently, and requires exactly one `200` and one `409`. It then
+checks that the conflict response names the winner and reads PostgreSQL directly
+to confirm the same claimant. The test item is restored afterward.
+
+Release, resolve, notifications, pagination, and claim expiry are not included
+in this slice.
 
 ## Verification
 
