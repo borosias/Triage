@@ -1,8 +1,11 @@
 # Flamingo
 
-Flamingo Home Assignment implementation with atomic item claiming, release,
-and resolve, plus sealed workspace reads and writes and durable notification
-delivery records.
+Flamingo Home Assignment implementation with atomic item claiming, sealed
+workspace access, durable notification records, stable keyset pagination, and
+request-driven stale-claim expiration.
+
+**Live:** https://triage-two-theta.vercel.app
+**Repository:** https://github.com/borosias/Triage
 
 ## Requirements
 
@@ -14,7 +17,6 @@ delivery records.
 ```powershell
 npm install
 Copy-Item .env.example .env.local
-npm run dev
 ```
 
 Configure the database URLs and server secrets in `.env.local`:
@@ -36,15 +38,15 @@ Seed the development database and verify the resulting fixtures:
 ```powershell
 npm run seed
 npm run seed:verify
+npm run dev
 ```
 
-`npm run seed` is a destructive development-only operation. It resets only the
-`Item`, `WorkspaceMembership`, `Workspace`, and `User` application tables before
-recreating four users, two workspaces, six memberships, and 10,000 items.
-Deleting Items also removes their associated `NotificationDelivery` rows through
-the committed foreign key. The seed does not remove Prisma migration metadata,
-schemas, or extensions. It uses `DIRECT_URL` and is safe to repeat: every run
-recreates the same deterministic fixtures instead of appending duplicates.
+`npm run seed` is a destructive development-only operation. It resets
+`NotificationDelivery`, `Item`, `WorkspaceMembership`, `Workspace`, and `User`
+before recreating four users, two workspaces, six memberships, and 10,000
+deterministic items. Prisma migration metadata, schemas, and extensions are not
+removed. The seed uses `DIRECT_URL` and is intended to be repeatable rather than
+append data across runs.
 
 ## Local login
 
@@ -78,17 +80,21 @@ Release clears both claim fields in one conditional `UPDATE ... RETURNING`, with
 item identity, workspace boundary, open state, claim ownership, membership, and
 role enforced by that statement.
 
-They may also resolve only their own claim on an `OPEN` item. Resolve uses a
-short Prisma interactive transaction: one conditional PostgreSQL mutation
-enforces Item identity, workspace boundary, state, claimant, membership, and
-role, then the same transaction client inserts one `PENDING`
-`NotificationDelivery`. If the insert fails, the Item mutation rolls back.
+They may also resolve only their own active claim on an `OPEN` item. After the
+route-level session, membership, and role checks, Resolve uses a short Prisma
+interactive transaction: it first performs the R5 workspace-scoped stale-claim
+sweep, then a conditional PostgreSQL mutation enforces Item identity, workspace
+boundary, state, claimant, lease freshness, membership, and role. On success,
+the same transaction inserts one `PENDING` `NotificationDelivery`. If that
+insert fails, the resolve mutation and the sweep roll back together.
 
 The queue waits for claim, release, and resolve responses before changing a row.
 A `200` response displays the confirmed state, while a `409` immediately
-reconciles the row to the canonical item returned by the server. Successful
-resolve removes the Item from the OPEN queue and reports `Resolved. Notification
-queued.` without waiting for notification delivery.
+reconciles the row to the canonical Item returned by the server. That conflict
+Item is a later fallback read, not an atomic snapshot tied to the failed update;
+another mutation can still change it afterward. Successful resolve removes the
+Item from the OPEN queue and reports `Resolved. Notification queued.` without
+waiting for notification delivery.
 
 With the development server running on port 3000, verify the R2 read contracts
 and seeded visibility matrix with:
@@ -132,12 +138,13 @@ failed requests. Every touched item is restored to its original claim state.
 The implemented guarantee is **best-effort-with-a-record**.
 
 Resolve durably commits both the resolved Item and a `PENDING` delivery record,
-then returns without calling or waiting for `notify()`. A Supabase Database
-Webhook starts a separate serverless invocation. The internal worker reloads
-canonical delivery data by delivery ID, atomically acquires only
-`PENDING -> PROCESSING`, and makes one attempt. `notify()` waits about one second
-and fails on roughly 20% of calls. Success stores `SENT`; a normal notify failure
-stores `FAILED` with a short non-sensitive error value.
+then returns without calling or waiting for `notify()`. When the Supabase
+Database Webhook described below is configured, the committed INSERT triggers a
+separate Vercel invocation. The internal worker reloads canonical delivery data
+by delivery ID, atomically acquires only `PENDING -> PROCESSING`, and makes one
+attempt. `notify()` waits about one second and fails on roughly 20% of calls.
+Success stores `SENT`; a normal notify failure stores `FAILED` with a short
+non-sensitive error value.
 
 There are no application retries:
 
@@ -166,8 +173,11 @@ In the Supabase Dashboard, create a Database Webhook with:
 - header: `x-notification-webhook-secret: <NOTIFICATION_WEBHOOK_SECRET>`
 
 Do not store the deployed URL or real secret in source code or a Prisma
-migration. Local verification does not require a configured remote webhook; it
-sends a representative Supabase INSERT payload directly to the internal worker.
+migration. Local verification does not require a configured remote webhook; it sends a
+representative Supabase INSERT payload directly to the internal worker. For a
+deterministic `r3:verify` run, use a development/test database where an external
+`NotificationDelivery` webhook is not simultaneously consuming the same rows.
+The deployed webhook path is a separate integration check.
 
 With the development server running and the same webhook secret available to
 both server and verifier, run:
@@ -198,7 +208,7 @@ GET /api/workspaces/:workspaceId/items
 GET /api/workspaces/:workspaceId/items?cursor=<opaque>
 ```
 
-Both forms return `{ items, nextCursor }`. Each page query requests 51 result 
+Both forms return `{ items, nextCursor }`. Each page query requests 51 result
 rows and exposes at most 50 Items, and returns `nextCursor: null` after
 the final page. A continuation applies the parameterized PostgreSQL predicate:
 
@@ -216,11 +226,12 @@ or rounded through a JavaScript `Date`.
 
 The Item access path is the normal composite index
 `(workspaceId, status, createdAt DESC, id DESC)`. The UI keeps the dense table,
-stores `nextCursor`, and appends the next page through **Load more**. Only that
-control is disabled while loading. A continuation error leaves existing rows
-visible and can be retried. Changing workspace starts a new traversal and
-invalidates in-flight continuation responses before they can append to the new
-workspace.
+stores `nextCursor`, and appends the next page through **Load more**. Continuation
+loading and Item mutations are mutually excluded: Item actions are disabled while
+a continuation is in flight, and **Load more** is disabled while an Item action
+is pending. A continuation error leaves existing rows visible and can be
+retried. Changing workspace starts a new traversal and invalidates in-flight
+continuation responses before they can append to the new workspace.
 
 This is not a database snapshot across HTTP requests. Resolving a row before it
 is reached removes it from the remaining `OPEN` traversal. An Item inserted
@@ -250,8 +261,10 @@ Run the read-only deep-page comparison on the real seeded database with:
 npm run r4:explain
 ```
 
-The following output was captured against the final schema and the same final
-index for both queries:
+The following is a recorded `EXPLAIN ANALYZE` capture against the final schema
+and the same final index for both queries. Row counts, boundaries, buffer counts,
+and absolute timings can change as the database is mutated by verification or
+normal use; the structural comparison is the part that matters:
 
 ```text
 Workspace: 10000000-0000-4000-8000-000000000001
@@ -309,7 +322,16 @@ to the composite boundary and keeps the work for the requested page bounded.
 
 Claim expiration uses **request-driven lazy cleanup**. PostgreSQL `claimedAt`
 and the PostgreSQL database clock determine whether a claim is more than 30
-minutes old. The next valid, authorized `GET queue`, `claim`, `release`, or
+minutes old. The stale comparison is strict: exactly 30:00 is still active; a
+claim becomes stale only when
+
+```sql
+claimedAt < CURRENT_TIMESTAMP - INTERVAL '30 minutes'
+```
+
+For `claim`, `release`, and `resolve`, PostgreSQL `CURRENT_TIMESTAMP` is the
+transaction-time clock, so the sweep and mutation predicates share the same
+boundary. The next valid, authorized `GET queue`, `claim`, `release`, or
 `resolve` interaction first performs an awaited, idempotent cleanup limited to
 that workspace, then reads or mutates canonical queue state. There is no
 background daemon, cron, scheduler, delayed queue, server timer, or Realtime
@@ -355,6 +377,16 @@ R5 verification intentionally targets stale/fresh cutoff, physical lazy
 cleanup, late resolve, concurrent reclaim, and authorization isolation;
 generic authentication and role cases remain covered by the existing
 verifiers.
+
+## Authorization assumption
+
+Workspace memberships are intentionally static in this take-home; there is no
+membership-management route. Writes repeat membership and role checks inside the
+database mutation predicate, but route prechecks, queue reads, and housekeeping
+are not designed to provide instantaneous revocation if an administrator changes
+membership concurrently outside the application. A system with mutable
+memberships would bind that authorization more tightly to the same transaction
+or move the invariant into a dedicated policy/RLS layer.
 
 ## Verification
 
