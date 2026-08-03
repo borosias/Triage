@@ -62,10 +62,11 @@ npm run session:verify
 ## Workspace-scoped queue reads, claims, release, and resolve
 
 Authenticated users can list only workspaces where they have a database-backed
-membership. Selecting one loads up to 50 newest `OPEN` items from that workspace,
-including both claimed and unclaimed items. `OWNER`, `MEMBER`, and `VIEWER` can
-all read. A request for a workspace without membership returns `404`, and every
-item query includes the requested workspace ID in its database predicate.
+membership. Selecting one loads the first 50 newest `OPEN` items from that
+workspace, including both claimed and unclaimed items. `OWNER`, `MEMBER`, and
+`VIEWER` can all read. A request for a workspace without membership returns
+`404`, and every item query includes the requested workspace ID in its database
+predicate.
 
 `OWNER` and `MEMBER` may claim an unclaimed `OPEN` item. `VIEWER` cannot claim,
 and item IDs cannot cross workspace boundaries. Claiming uses one conditional
@@ -180,7 +181,115 @@ covers resolve roles and isolation, the Item-plus-delivery transaction result,
 secret and payload validation, one CAS acquisition, terminal `SENT | FAILED`,
 duplicate no-op behavior, safe failure storage, and fixture restoration.
 
-Pagination and claim expiry are not included in this slice.
+Claim expiry is not included in this slice.
+
+## R4 stable queue pagination
+
+The queue uses **stateless composite keyset/seek pagination** ordered by
+`(createdAt DESC, id DESC)`. `createdAt` is the business ordering value, while
+the unique `id` tie-breaker makes every boundary deterministic when timestamps
+match. The production route never uses `OFFSET` and never fetches the whole
+queue.
+
+The API contract is:
+
+```text
+GET /api/workspaces/:workspaceId/items
+GET /api/workspaces/:workspaceId/items?cursor=<opaque>
+```
+
+Both forms return `{ items, nextCursor }`. Each page query requests 51 result 
+rows and exposes at most 50 Items, and returns `nextCursor: null` after
+the final page. A continuation applies the parameterized PostgreSQL predicate:
+
+```sql
+("createdAt", "id") < ($cursorCreatedAt::timestamptz, $cursorId::uuid)
+```
+
+The opaque base64url JSON cursor is versioned and bound to the workspace. It
+contains `v`, `workspaceId`, `createdAt`, and `id`, but is not an authorization
+boundary. The route validates its size, encoding, strict structure, version,
+UUIDs, exact timestamp form, and workspace binding after the existing R2
+membership check. PostgreSQL formats the cursor timestamp as UTC text with six
+fractional digits. That exact `TIMESTAMPTZ(6)` value is never constructed from
+or rounded through a JavaScript `Date`.
+
+The Item access path is the normal composite index
+`(workspaceId, status, createdAt DESC, id DESC)`. The UI keeps the dense table,
+stores `nextCursor`, and appends the next page through **Load more**. Only that
+control is disabled while loading. A continuation error leaves existing rows
+visible and can be retried. Changing workspace starts a new traversal and
+invalidates in-flight continuation responses before they can append to the new
+workspace.
+
+This is not a database snapshot across HTTP requests. Resolving a row before it
+is reached removes it from the remaining `OPEN` traversal. An Item inserted
+after traversal starts with a key ahead of the current cursor is not seen until
+refresh; an artificially older inserted key behind the cursor can appear later.
+Each SELECT sees current database state. The implementation therefore does not
+promise that every row present on page 1 will be returned, or exactly-once
+observation of a changing dataset.
+
+With the development server running, execute the HTTP and PostgreSQL regression
+scenarios with:
+
+```powershell
+npm run r4:verify
+```
+
+The verifier covers bounded full traversal, exact database ordering, repeated
+IDs, strict page boundaries, malformed and cross-workspace cursors, all R2
+roles, the literal OFFSET-shift resolve scenario, a later-page claim, a resolved
+cursor Item, two same-millisecond microsecond timestamps across a page boundary,
+and the documented new-row limitation. Every temporary fixture workspace is
+deleted in `finally`.
+
+Run the read-only deep-page comparison on the real seeded database with:
+
+```powershell
+npm run r4:explain
+```
+
+The following output was captured against the final schema and the same final
+index for both queries:
+
+```text
+Workspace: 10000000-0000-4000-8000-000000000001
+Matching OPEN rows: 5588
+Deep offset: 4191
+Equivalent keyset boundary: (2024-07-01T04:41:02.000000Z, 20000000-0000-4000-8000-000000000b1e)
+
+Naive OFFSET plan:
+
+Limit  (cost=146.95..148.70 rows=50 width=24) (actual time=1.333..1.345 rows=50 loops=1)
+  Buffers: shared hit=981
+  ->  Index Only Scan using "Item_workspaceId_status_createdAt_id_idx" on "Item"  (cost=0.29..195.95 rows=5591 width=24) (actual time=0.023..1.101 rows=4241 loops=1)
+        Index Cond: (("workspaceId" = '10000000-0000-4000-8000-000000000001'::uuid) AND (status = 'OPEN'::"ItemStatus"))
+        Heap Fetches: 950
+        Buffers: shared hit=981
+Planning:
+  Buffers: shared hit=5
+Planning Time: 0.123 ms
+Execution Time: 1.374 ms
+
+Composite keyset plan:
+
+Limit  (cost=0.29..2.60 rows=50 width=24) (actual time=0.019..0.033 rows=50 loops=1)
+  Buffers: shared hit=5
+  ->  Index Only Scan using "Item_workspaceId_status_createdAt_id_idx" on "Item"  (cost=0.29..64.74 rows=1394 width=24) (actual time=0.018..0.027 rows=50 loops=1)
+        Index Cond: (("workspaceId" = '10000000-0000-4000-8000-000000000001'::uuid) AND (status = 'OPEN'::"ItemStatus") AND (ROW("createdAt", id) < ROW('2024-07-01 04:41:02+00'::timestamp with time zone, '20000000-0000-4000-8000-000000000b1e'::uuid)))
+        Heap Fetches: 2
+        Buffers: shared hit=5
+Planning Time: 0.104 ms
+Execution Time: 0.088 ms
+```
+
+In this run, OFFSET advanced through 4,241 index entries and needed 950 heap
+fetches plus 981 shared-buffer hits before returning 50 rows. The keyset query
+started at the composite boundary, returned 50 rows with 2 heap fetches and 5
+shared-buffer hits, and used the same index. The measured absolute difference
+is only about 1.3 ms at this data size; the main benefits are avoiding work 
+proportional to page depth and correctness when earlier rows leave the live queue
 
 ## Verification
 
@@ -193,4 +302,6 @@ npm run r2:verify
 npm run r1:verify
 npm run release:verify
 npm run r3:verify
+npm run r4:verify
+npm run r4:explain
 ```

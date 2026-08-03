@@ -99,7 +99,12 @@ async function verifyQueue(cookie, workspaceName, expectedStatus) {
   }
 
   const body = await readJson(response);
+  assert.deepEqual(Object.keys(body).sort(), ["items", "nextCursor"]);
   assert.ok(Array.isArray(body.items), "queue response must contain items");
+  assert.ok(
+    body.nextCursor === null || typeof body.nextCursor === "string",
+    "queue response must contain an opaque next cursor or null",
+  );
   assert.ok(
     body.items.length <= 50,
     "queue response must contain at most 50 items",

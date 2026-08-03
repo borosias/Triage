@@ -73,7 +73,7 @@ model Item {
   resolvedBy           User?                 @relation("ItemResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
   notificationDelivery NotificationDelivery?
 
-  @@index([workspaceId, status])
+  @@index([workspaceId, status, createdAt(sort: Desc), id(sort: Desc)])
 }
 
 model NotificationDelivery {

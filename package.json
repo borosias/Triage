@@ -19,7 +19,9 @@
     "r2:verify": "node scripts/verify-r2.mjs",
     "r1:verify": "node scripts/verify-r1.mjs",
     "release:verify": "node scripts/verify-release.mjs",
-    "r3:verify": "tsx scripts/verify-r3.ts"
+    "r3:verify": "tsx scripts/verify-r3.ts",
+    "r4:verify": "tsx scripts/verify-r4.ts",
+    "r4:explain": "tsx scripts/explain-r4.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.9.1",

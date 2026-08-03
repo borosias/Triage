@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type CurrentUser = {
   id: string;
@@ -33,6 +33,8 @@ type ItemActionItem =
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 
+type LoadMoreState = "idle" | "loading" | "error";
+
 type ItemAction = "claim" | "release" | "resolve";
 
 type ItemActionResponse = {
@@ -47,6 +49,11 @@ type QueueNotice = {
 
 type WorkspaceQueueProps = {
   currentUser: CurrentUser | null;
+};
+
+type QueueResponse = {
+  items: QueueItem[];
+  nextCursor: string | null;
 };
 
 export function reconcileQueueAfterItemAction(
@@ -72,11 +79,15 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
   const [queueState, setQueueState] = useState<LoadState>("idle");
   const [workspaceReload, setWorkspaceReload] = useState(0);
   const [queueReload, setQueueReload] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadMoreState, setLoadMoreState] =
+    useState<LoadMoreState>("idle");
   const [pendingItemActions, setPendingItemActions] = useState<
     Record<string, ItemAction>
   >({});
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
   const [queueNotice, setQueueNotice] = useState<QueueNotice | null>(null);
+  const queueGenerationRef = useRef(0);
 
   const currentUserId = currentUser?.id ?? null;
   const selectedWorkspace = workspaces.find(
@@ -93,11 +104,14 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
     const controller = new AbortController();
 
     async function loadWorkspaces() {
+      queueGenerationRef.current += 1;
       setWorkspaceState("loading");
       setWorkspaces([]);
       setSelectedWorkspaceId(null);
       setItems([]);
       setQueueState("idle");
+      setNextCursor(null);
+      setLoadMoreState("idle");
       setPendingItemActions({});
       setActionErrors({});
       setQueueNotice(null);
@@ -136,10 +150,14 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
     }
 
     const controller = new AbortController();
+    const generation = queueGenerationRef.current + 1;
+    queueGenerationRef.current = generation;
 
     async function loadItems() {
       setQueueState("loading");
       setItems([]);
+      setNextCursor(null);
+      setLoadMoreState("idle");
       setPendingItemActions({});
       setActionErrors({});
       setQueueNotice(null);
@@ -154,16 +172,23 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
           throw new Error("Queue request failed");
         }
 
-        const body = (await response.json()) as { items: QueueItem[] };
+        const body = (await response.json()) as QueueResponse;
+
+        if (queueGenerationRef.current !== generation) {
+          return;
+        }
 
         setItems(body.items);
+        setNextCursor(body.nextCursor);
         setQueueState("ready");
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
 
-        setQueueState("error");
+        if (queueGenerationRef.current === generation) {
+          setQueueState("error");
+        }
       }
     }
 
@@ -171,6 +196,45 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
 
     return () => controller.abort();
   }, [queueReload, selectedWorkspaceId]);
+
+  async function loadMore() {
+    if (
+      !selectedWorkspaceId ||
+      !nextCursor ||
+      loadMoreState === "loading"
+    ) {
+      return;
+    }
+
+    const workspaceId = selectedWorkspaceId;
+    const cursor = nextCursor;
+    const generation = queueGenerationRef.current;
+    setLoadMoreState("loading");
+
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspaceId}/items?cursor=${encodeURIComponent(cursor)}`,
+      );
+
+      if (!response.ok) {
+        throw new Error("Pagination request failed");
+      }
+
+      const body = (await response.json()) as QueueResponse;
+
+      if (queueGenerationRef.current !== generation) {
+        return;
+      }
+
+      setItems((current) => [...current, ...body.items]);
+      setNextCursor(body.nextCursor);
+      setLoadMoreState("idle");
+    } catch {
+      if (queueGenerationRef.current === generation) {
+        setLoadMoreState("error");
+      }
+    }
+  }
 
   async function updateItem(item: QueueItem, action: ItemAction) {
     setPendingItemActions((current) => ({
@@ -272,8 +336,11 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
             value={selectedWorkspaceId ?? ""}
             disabled={workspaceState !== "ready" || workspaces.length === 0}
             onChange={(event) => {
+              queueGenerationRef.current += 1;
               setItems([]);
               setQueueState("loading");
+              setNextCursor(null);
+              setLoadMoreState("idle");
               setQueueNotice(null);
               setSelectedWorkspaceId(event.target.value);
             }}
@@ -338,14 +405,19 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
           <button
             className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700"
             type="button"
-            onClick={() => setQueueReload((value) => value + 1)}
+            onClick={() => {
+              queueGenerationRef.current += 1;
+              setQueueReload((value) => value + 1);
+            }}
           >
             Retry
           </button>
         </div>
       ) : null}
 
-      {queueState === "ready" && items.length === 0 ? (
+      {queueState === "ready" &&
+      items.length === 0 &&
+      nextCursor === null ? (
         <p className="text-sm text-slate-600">The open queue is empty.</p>
       ) : null}
 
@@ -425,6 +497,24 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
               })}
             </tbody>
           </table>
+        </div>
+      ) : null}
+
+      {queueState === "ready" && nextCursor !== null ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
+            type="button"
+            disabled={loadMoreState === "loading"}
+            onClick={() => void loadMore()}
+          >
+            {loadMoreState === "loading" ? "Loading more..." : "Load more"}
+          </button>
+          {loadMoreState === "error" ? (
+            <p className="text-sm text-red-700" role="alert">
+              Could not load more items. Try again.
+            </p>
+          ) : null}
         </div>
       ) : null}
     </section>
