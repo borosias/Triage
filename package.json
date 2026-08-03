@@ -21,6 +21,7 @@
     "release:verify": "node scripts/verify-release.mjs",
     "r3:verify": "tsx scripts/verify-r3.ts",
     "r4:verify": "tsx scripts/verify-r4.ts",
+    "r5:verify": "tsx scripts/verify-r5.ts",
     "r4:explain": "tsx scripts/explain-r4.ts"
   },
   "dependencies": {

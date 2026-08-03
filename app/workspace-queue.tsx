@@ -56,6 +56,8 @@ type QueueResponse = {
   nextCursor: string | null;
 };
 
+const queueRevalidationIntervalMs = 10_000;
+
 export function reconcileQueueAfterItemAction(
   items: QueueItem[],
   canonicalItem: ItemActionItem,
@@ -82,6 +84,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadMoreState, setLoadMoreState] =
     useState<LoadMoreState>("idle");
+  const [hasLoadedContinuation, setHasLoadedContinuation] = useState(false);
   const [pendingItemActions, setPendingItemActions] = useState<
     Record<string, ItemAction>
   >({});
@@ -95,6 +98,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
   );
   const canClaimItems =
     selectedWorkspace?.role === "OWNER" || selectedWorkspace?.role === "MEMBER";
+  const pendingItemActionCount = Object.keys(pendingItemActions).length;
 
   useEffect(() => {
     if (!currentUserId) {
@@ -112,6 +116,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
       setQueueState("idle");
       setNextCursor(null);
       setLoadMoreState("idle");
+      setHasLoadedContinuation(false);
       setPendingItemActions({});
       setActionErrors({});
       setQueueNotice(null);
@@ -158,6 +163,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
       setItems([]);
       setNextCursor(null);
       setLoadMoreState("idle");
+      setHasLoadedContinuation(false);
       setPendingItemActions({});
       setActionErrors({});
       setQueueNotice(null);
@@ -197,6 +203,92 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
     return () => controller.abort();
   }, [queueReload, selectedWorkspaceId]);
 
+  useEffect(() => {
+    if (
+      !selectedWorkspaceId ||
+      queueState !== "ready" ||
+      loadMoreState === "loading" ||
+      hasLoadedContinuation ||
+      pendingItemActionCount > 0
+    ) {
+      return;
+    }
+
+    const workspaceId = selectedWorkspaceId;
+    const generation = queueGenerationRef.current;
+    let controller: AbortController | null = null;
+    let disposed = false;
+    let requestInFlight = false;
+
+    async function revalidateQueue() {
+      if (
+        disposed ||
+        requestInFlight ||
+        document.visibilityState !== "visible"
+      ) {
+        return;
+      }
+
+      requestInFlight = true;
+      controller = new AbortController();
+
+      try {
+        const response = await fetch(`/api/workspaces/${workspaceId}/items`, {
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error("Queue revalidation failed");
+        }
+
+        const body = (await response.json()) as QueueResponse;
+
+        if (disposed || queueGenerationRef.current !== generation) {
+          return;
+        }
+
+        setItems(body.items);
+        setNextCursor(body.nextCursor);
+        setLoadMoreState("idle");
+        setActionErrors({});
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+      } finally {
+        requestInFlight = false;
+        controller = null;
+      }
+    }
+
+    function revalidateVisibleQueue() {
+      if (document.visibilityState === "visible") {
+        void revalidateQueue();
+      }
+    }
+
+    const intervalId = window.setInterval(
+      () => void revalidateQueue(),
+      queueRevalidationIntervalMs,
+    );
+    document.addEventListener("visibilitychange", revalidateVisibleQueue);
+    window.addEventListener("focus", revalidateVisibleQueue);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", revalidateVisibleQueue);
+      window.removeEventListener("focus", revalidateVisibleQueue);
+      controller?.abort();
+    };
+  }, [
+    hasLoadedContinuation,
+    loadMoreState,
+    pendingItemActionCount,
+    queueState,
+    selectedWorkspaceId,
+  ]);
+
   async function loadMore() {
     if (
       !selectedWorkspaceId ||
@@ -208,7 +300,8 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
 
     const workspaceId = selectedWorkspaceId;
     const cursor = nextCursor;
-    const generation = queueGenerationRef.current;
+    const generation = queueGenerationRef.current + 1;
+    queueGenerationRef.current = generation;
     setLoadMoreState("loading");
 
     try {
@@ -228,6 +321,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
 
       setItems((current) => [...current, ...body.items]);
       setNextCursor(body.nextCursor);
+      setHasLoadedContinuation(true);
       setLoadMoreState("idle");
     } catch {
       if (queueGenerationRef.current === generation) {
@@ -237,6 +331,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
   }
 
   async function updateItem(item: QueueItem, action: ItemAction) {
+    queueGenerationRef.current += 1;
     setPendingItemActions((current) => ({
       ...current,
       [item.id]: action,
@@ -341,6 +436,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
               setQueueState("loading");
               setNextCursor(null);
               setLoadMoreState("idle");
+              setHasLoadedContinuation(false);
               setQueueNotice(null);
               setSelectedWorkspaceId(event.target.value);
             }}

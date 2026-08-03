@@ -261,35 +261,100 @@ Equivalent keyset boundary: (2024-07-01T04:41:02.000000Z, 20000000-0000-4000-800
 
 Naive OFFSET plan:
 
-Limit  (cost=146.95..148.70 rows=50 width=24) (actual time=1.333..1.345 rows=50 loops=1)
-  Buffers: shared hit=981
-  ->  Index Only Scan using "Item_workspaceId_status_createdAt_id_idx" on "Item"  (cost=0.29..195.95 rows=5591 width=24) (actual time=0.023..1.101 rows=4241 loops=1)
-        Index Cond: (("workspaceId" = '10000000-0000-4000-8000-000000000001'::uuid) AND (status = 'OPEN'::"ItemStatus"))
-        Heap Fetches: 950
-        Buffers: shared hit=981
-Planning:
-  Buffers: shared hit=5
-Planning Time: 0.123 ms
-Execution Time: 1.374 ms
+Limit  (cost=403.84..408.66 rows=50 width=208) (actual time=8.804..8.905 rows=50 loops=1)
+  Buffers: shared hit=4272
+  ->  Nested Loop Left Join  (cost=0.45..538.41 rows=5589 width=208) (actual time=0.031..8.676 rows=4241 loops=1)
+        Buffers: shared hit=4272
+        ->  Index Scan using "Item_workspaceId_status_createdAt_id_idx" on "Item" item  (cost=0.29..342.46 rows=5589 width=100) (actual time=0.015..2.326 rows=4241 loops=1)
+              Index Cond: (("workspaceId" = '10000000-0000-4000-8000-000000000001'::uuid) AND (status = 'OPEN'::"ItemStatus"))
+              Buffers: shared hit=4272
+        ->  Memoize  (cost=0.16..0.18 rows=1 width=48) (actual time=0.000..0.000 rows=0 loops=4241)
+              Cache Key: item."claimedById"
+              Cache Mode: logical
+              Hits: 4240  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+              ->  Index Scan using "User_pkey" on "User" claimant  (cost=0.15..0.17 rows=1 width=48) (actual time=0.001..0.001 rows=0 loops=1)
+                    Index Cond: (id = item."claimedById")
+Planning Time: 0.180 ms
+Execution Time: 8.950 ms
 
 Composite keyset plan:
 
-Limit  (cost=0.29..2.60 rows=50 width=24) (actual time=0.019..0.033 rows=50 loops=1)
-  Buffers: shared hit=5
-  ->  Index Only Scan using "Item_workspaceId_status_createdAt_id_idx" on "Item"  (cost=0.29..64.74 rows=1394 width=24) (actual time=0.018..0.027 rows=50 loops=1)
-        Index Cond: (("workspaceId" = '10000000-0000-4000-8000-000000000001'::uuid) AND (status = 'OPEN'::"ItemStatus") AND (ROW("createdAt", id) < ROW('2024-07-01 04:41:02+00'::timestamp with time zone, '20000000-0000-4000-8000-000000000b1e'::uuid)))
-        Heap Fetches: 2
-        Buffers: shared hit=5
-Planning Time: 0.104 ms
-Execution Time: 0.088 ms
+Limit  (cost=0.45..8.18 rows=50 width=208) (actual time=0.036..0.178 rows=50 loops=1)
+  Buffers: shared hit=52
+  ->  Nested Loop Left Join  (cost=0.45..216.19 rows=1394 width=208) (actual time=0.035..0.172 rows=50 loops=1)
+        Buffers: shared hit=52
+        ->  Index Scan using "Item_workspaceId_status_createdAt_id_idx" on "Item" item  (cost=0.29..167.05 rows=1394 width=100) (actual time=0.019..0.074 rows=50 loops=1)
+              Index Cond: (("workspaceId" = '10000000-0000-4000-8000-000000000001'::uuid) AND (status = 'OPEN'::"ItemStatus") AND (ROW("createdAt", id) < ROW('2024-07-01 04:41:02+00'::timestamp with time zone, '20000000-0000-4000-8000-000000000b1e'::uuid)))
+              Buffers: shared hit=52
+        ->  Memoize  (cost=0.16..0.19 rows=1 width=48) (actual time=0.000..0.000 rows=0 loops=50)
+              Cache Key: item."claimedById"
+              Cache Mode: logical
+              Hits: 49  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+              ->  Index Scan using "User_pkey" on "User" claimant  (cost=0.15..0.18 rows=1 width=48) (actual time=0.001..0.001 rows=0 loops=1)
+                    Index Cond: (id = item."claimedById")
+Planning Time: 0.173 ms
+Execution Time: 0.219 ms
 ```
 
-In this run, OFFSET advanced through 4,241 index entries and needed 950 heap
-fetches plus 981 shared-buffer hits before returning 50 rows. The keyset query
-started at the composite boundary, returned 50 rows with 2 heap fetches and 5
-shared-buffer hits, and used the same index. The measured absolute difference
-is only about 1.3 ms at this data size; the main benefits are avoiding work 
-proportional to page depth and correctness when earlier rows leave the live queue
+In this run, OFFSET advanced through 4,241 matching rows and touched 4,272
+shared buffers before returning 50 rows, with 8.950 ms execution time.
+The composite keyset query started directly at the `(createdAt, id)` boundary,
+returned 50 rows, touched 52 shared buffers, and executed in 0.219 ms.
+
+Absolute timings are environment-dependent; the important difference is
+structural: OFFSET work grows with page depth, while keyset pagination seeks
+to the composite boundary and keeps the work for the requested page bounded.
+
+## R5 request-driven lazy claim expiration
+
+Claim expiration uses **request-driven lazy cleanup**. PostgreSQL `claimedAt`
+and the PostgreSQL database clock determine whether a claim is more than 30
+minutes old. The next valid, authorized `GET queue`, `claim`, `release`, or
+`resolve` interaction first performs an awaited, idempotent cleanup limited to
+that workspace, then reads or mutates canonical queue state. There is no
+background daemon, cron, scheduler, delayed queue, server timer, or Realtime
+subscription.
+
+An idle workspace can therefore retain physically stale `claimedById` and
+`claimedAt` columns until its next authorized interaction. That stored stale
+value does not grant mutation authority: release and resolve independently
+require the current user to hold a still-active claim.
+
+Resolve is evaluated against the current claim state when the request is
+processed. If that user's stored claim is already stale, the sweep clears it
+and resolve returns `409`, leaves the Item `OPEN`, and creates no
+`NotificationDelivery`; the user must claim the Item again before resolving.
+
+This implementation does not use per-lease fencing. If the same user reclaims
+the Item before a delayed request from an older lease reaches the server, the
+backend cannot distinguish that older request from an action against the new
+lease. A system that required that distinction would add a claim generation or
+token and require mutations to present it. The same limitation applies to a
+delayed release.
+
+While an active first page is visible, the client performs a canonical backend
+read approximately every 10 seconds and also revalidates when the tab becomes
+visible or the window regains focus. This is a UX refresh only, not a realtime
+or exact-at-30:00 cleanup guarantee. Background polling pauses after a
+continuation page has been loaded so it cannot replace or merge an in-progress
+R4 traversal.
+
+At materially higher traffic, a sweep on every queue interaction would become
+wasteful; scheduled or coalesced cleanup would be a better design. If larger
+workspace measurements also show the workspace-scoped stale predicate becoming
+material, a targeted index should be evaluated from real query plans rather
+than added preemptively at the current roughly 10,000-row scale.
+
+With the development server running, verify the R5-specific guarantees with:
+
+```powershell
+npm run r5:verify
+```
+
+R5 verification intentionally targets stale/fresh cutoff, physical lazy
+cleanup, late resolve, concurrent reclaim, and authorization isolation;
+generic authentication and role cases remain covered by the existing
+verifiers.
 
 ## Verification
 
@@ -303,5 +368,6 @@ npm run r1:verify
 npm run release:verify
 npm run r3:verify
 npm run r4:verify
+npm run r5:verify
 npm run r4:explain
 ```

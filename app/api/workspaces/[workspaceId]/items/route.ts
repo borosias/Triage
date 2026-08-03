@@ -8,6 +8,7 @@ import {
   type ItemCursor,
 } from "@/lib/item-pagination";
 import { getCurrentUser } from "@/lib/session";
+import { sweepStaleClaims } from "@/lib/stale-claims";
 import { getWorkspaceMembership } from "@/lib/workspace-access";
 
 const workspaceIdSchema = z.uuid();
@@ -128,6 +129,8 @@ export async function GET(request: Request, context: ItemsRouteContext) {
     ) {
       return NextResponse.json({ error: "Invalid cursor." }, { status: 400 });
     }
+
+    await sweepStaleClaims(db, parsedWorkspaceId.data);
 
     const rows = cursor
       ? await readContinuationPage(parsedWorkspaceId.data, cursor)

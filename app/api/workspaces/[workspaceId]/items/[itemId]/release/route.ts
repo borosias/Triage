@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { db } from "@/lib/db";
 import { getCurrentUser } from "@/lib/session";
+import { sweepStaleClaims } from "@/lib/stale-claims";
 import { getWorkspaceMembership } from "@/lib/workspace-access";
 
 const releaseRouteParamsSchema = z
@@ -45,41 +46,6 @@ export async function POST(_request: Request, context: ReleaseRouteContext) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
 
-    const [releasedItem] = await db.$queryRaw<ReleasedItemRow[]>`
-      UPDATE "Item" AS item
-      SET
-        "claimedById" = NULL,
-        "claimedAt" = NULL
-      FROM "WorkspaceMembership" AS membership
-      WHERE item."id" = ${itemId}::uuid
-        AND item."workspaceId" = ${workspaceId}::uuid
-        AND item."status" = 'OPEN'::"ItemStatus"
-        AND item."claimedById" = ${currentUser.id}::uuid
-        AND membership."workspaceId" = item."workspaceId"
-        AND membership."userId" = ${currentUser.id}::uuid
-        AND membership."role" IN (
-          'OWNER'::"WorkspaceRole",
-          'MEMBER'::"WorkspaceRole"
-        )
-      RETURNING
-        item."id",
-        item."workspaceId",
-        item."title",
-        item."status"::text,
-        item."claimedById",
-        item."claimedAt",
-        item."createdAt"
-    `;
-
-    if (releasedItem) {
-      return NextResponse.json({
-        item: {
-          ...releasedItem,
-          claimedBy: null,
-        },
-      });
-    }
-
     const membership = await getWorkspaceMembership(
       currentUser.id,
       workspaceId,
@@ -97,6 +63,49 @@ export async function POST(_request: Request, context: ReleaseRouteContext) {
         { error: "Viewers cannot release items." },
         { status: 403 },
       );
+    }
+
+    const releasedItem = await db.$transaction(async (tx) => {
+      await sweepStaleClaims(tx, workspaceId);
+
+      const [item] = await tx.$queryRaw<ReleasedItemRow[]>`
+        UPDATE "Item" AS item
+        SET
+          "claimedById" = NULL,
+          "claimedAt" = NULL
+        FROM "WorkspaceMembership" AS membership
+        WHERE item."id" = ${itemId}::uuid
+          AND item."workspaceId" = ${workspaceId}::uuid
+          AND item."status" = 'OPEN'::"ItemStatus"
+          AND item."claimedById" = ${currentUser.id}::uuid
+          AND item."claimedAt" IS NOT NULL
+          AND item."claimedAt" >= CURRENT_TIMESTAMP - INTERVAL '30 minutes'
+          AND membership."workspaceId" = item."workspaceId"
+          AND membership."userId" = ${currentUser.id}::uuid
+          AND membership."role" IN (
+            'OWNER'::"WorkspaceRole",
+            'MEMBER'::"WorkspaceRole"
+          )
+        RETURNING
+          item."id",
+          item."workspaceId",
+          item."title",
+          item."status"::text,
+          item."claimedById",
+          item."claimedAt",
+          item."createdAt"
+      `;
+
+      return item ?? null;
+    });
+
+    if (releasedItem) {
+      return NextResponse.json({
+        item: {
+          ...releasedItem,
+          claimedBy: null,
+        },
+      });
     }
 
     const canonicalItem = await db.item.findFirst({

@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { db } from "@/lib/db";
 import { getCurrentUser } from "@/lib/session";
+import { sweepStaleClaims } from "@/lib/stale-claims";
 import { getWorkspaceMembership } from "@/lib/workspace-access";
 
 const resolveRouteParamsSchema = z
@@ -47,7 +48,28 @@ export async function POST(_request: Request, context: ResolveRouteContext) {
       return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
     }
 
+    const membership = await getWorkspaceMembership(
+      currentUser.id,
+      workspaceId,
+    );
+
+    if (!membership) {
+      return NextResponse.json(
+        { error: "Workspace or item not found." },
+        { status: 404 },
+      );
+    }
+
+    if (membership.role === "VIEWER") {
+      return NextResponse.json(
+        { error: "Viewers cannot resolve items." },
+        { status: 403 },
+      );
+    }
+
     const resolution = await db.$transaction(async (tx) => {
+      await sweepStaleClaims(tx, workspaceId);
+
       const [item] = await tx.$queryRaw<ResolvedItemRow[]>`
         UPDATE "Item" AS item
         SET
@@ -61,6 +83,8 @@ export async function POST(_request: Request, context: ResolveRouteContext) {
           AND item."workspaceId" = ${workspaceId}::uuid
           AND item."status" = 'OPEN'::"ItemStatus"
           AND item."claimedById" = ${currentUser.id}::uuid
+          AND item."claimedAt" IS NOT NULL
+          AND item."claimedAt" >= CURRENT_TIMESTAMP - INTERVAL '30 minutes'
           AND membership."workspaceId" = item."workspaceId"
           AND membership."userId" = ${currentUser.id}::uuid
           AND membership."role" IN (
@@ -108,25 +132,6 @@ export async function POST(_request: Request, context: ResolveRouteContext) {
       });
     }
 
-    const membership = await getWorkspaceMembership(
-      currentUser.id,
-      workspaceId,
-    );
-
-    if (!membership) {
-      return NextResponse.json(
-        { error: "Workspace or item not found." },
-        { status: 404 },
-      );
-    }
-
-    if (membership.role === "VIEWER") {
-      return NextResponse.json(
-        { error: "Viewers cannot resolve items." },
-        { status: 403 },
-      );
-    }
-
     const canonicalItem = await db.item.findFirst({
       where: {
         id: itemId,
@@ -163,7 +168,9 @@ export async function POST(_request: Request, context: ResolveRouteContext) {
         error:
           canonicalItem.status === "RESOLVED"
             ? "Item is already resolved."
-            : canonicalItem.claimedById !== currentUser.id
+            : canonicalItem.claimedById === null
+              ? "Item is not actively claimed. Claim it again before resolving."
+              : canonicalItem.claimedById !== currentUser.id
               ? "Item is claimed by another user."
               : "Item state changed before it could be resolved.",
         item: canonicalItem,
