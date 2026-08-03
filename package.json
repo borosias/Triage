@@ -18,7 +18,8 @@
     "session:verify": "node scripts/verify-session.mjs",
     "r2:verify": "node scripts/verify-r2.mjs",
     "r1:verify": "node scripts/verify-r1.mjs",
-    "release:verify": "node scripts/verify-release.mjs"
+    "release:verify": "node scripts/verify-release.mjs",
+    "r3:verify": "tsx scripts/verify-r3.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.9.1",

@@ -18,14 +18,22 @@ enum ItemStatus {
   RESOLVED
 }
 
+enum NotificationDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
 model User {
   id        String   @id @default(uuid()) @db.Uuid
   name      String
   createdAt DateTime @default(now()) @db.Timestamptz(6)
 
-  workspaceMemberships WorkspaceMembership[]
-  claimedItems         Item[]                @relation("ItemClaimedBy")
-  resolvedItems        Item[]                @relation("ItemResolvedBy")
+  workspaceMemberships   WorkspaceMembership[]
+  claimedItems           Item[]                 @relation("ItemClaimedBy")
+  resolvedItems          Item[]                 @relation("ItemResolvedBy")
+  notificationDeliveries NotificationDelivery[] @relation("NotificationDeliveryResolvedBy")
 }
 
 model Workspace {
@@ -33,8 +41,9 @@ model Workspace {
   name      String
   createdAt DateTime @default(now()) @db.Timestamptz(6)
 
-  memberships WorkspaceMembership[]
-  items       Item[]
+  memberships            WorkspaceMembership[]
+  items                  Item[]
+  notificationDeliveries NotificationDelivery[]
 }
 
 model WorkspaceMembership {
@@ -59,9 +68,29 @@ model Item {
   resolvedAt   DateTime?  @db.Timestamptz(6)
   createdAt    DateTime   @default(now()) @db.Timestamptz(6)
 
-  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  claimedBy  User?     @relation("ItemClaimedBy", fields: [claimedById], references: [id], onDelete: Restrict)
-  resolvedBy User?     @relation("ItemResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+  workspace            Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  claimedBy            User?                 @relation("ItemClaimedBy", fields: [claimedById], references: [id], onDelete: Restrict)
+  resolvedBy           User?                 @relation("ItemResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+  notificationDelivery NotificationDelivery?
 
   @@index([workspaceId, status])
+}
+
+model NotificationDelivery {
+  id           String                     @id @default(uuid()) @db.Uuid
+  itemId       String                     @unique @db.Uuid
+  workspaceId  String                     @db.Uuid
+  resolvedById String                     @db.Uuid
+  status       NotificationDeliveryStatus @default(PENDING)
+  createdAt    DateTime                   @default(now()) @db.Timestamptz(6)
+  processingAt DateTime?                  @db.Timestamptz(6)
+  finishedAt   DateTime?                  @db.Timestamptz(6)
+  error        String?                    @db.VarChar(160)
+
+  item       Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  resolvedBy User      @relation("NotificationDeliveryResolvedBy", fields: [resolvedById], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId])
+  @@index([resolvedById])
 }

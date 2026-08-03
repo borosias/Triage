@@ -1,7 +1,8 @@
 # Flamingo
 
-Flamingo Home Assignment implementation with atomic item claiming and release,
-plus sealed workspace reads and writes.
+Flamingo Home Assignment implementation with atomic item claiming, release,
+and resolve, plus sealed workspace reads and writes and durable notification
+delivery records.
 
 ## Requirements
 
@@ -16,11 +17,12 @@ Copy-Item .env.example .env.local
 npm run dev
 ```
 
-Configure the database URLs and session secret in `.env.local`:
+Configure the database URLs and server secrets in `.env.local`:
 
 - `DATABASE_URL`: the Supabase transaction pooler URL used by the serverless application runtime.
 - `DIRECT_URL`: the Supabase direct database URL used by Prisma migrations. If the direct IPv6 endpoint is unavailable locally, use the Supabase session pooler URL instead.
 - `SESSION_SECRET`: a private random value of at least 32 characters used to sign the local login cookie.
+- `NOTIFICATION_WEBHOOK_SECRET`: a private random value of at least 32 characters shared only by the Supabase Database Webhook and the internal notification worker.
 
 Generate the Prisma Client and apply committed migrations:
 
@@ -38,10 +40,11 @@ npm run seed:verify
 
 `npm run seed` is a destructive development-only operation. It resets only the
 `Item`, `WorkspaceMembership`, `Workspace`, and `User` application tables before
-recreating four users, two workspaces, six memberships, and 10,000 items. It
-does not remove Prisma migration metadata, schemas, or extensions. The seed uses
-`DIRECT_URL` and is safe to repeat: every run recreates the same deterministic
-fixtures instead of appending duplicates.
+recreating four users, two workspaces, six memberships, and 10,000 items.
+Deleting Items also removes their associated `NotificationDelivery` rows through
+the committed foreign key. The seed does not remove Prisma migration metadata,
+schemas, or extensions. It uses `DIRECT_URL` and is safe to repeat: every run
+recreates the same deterministic fixtures instead of appending duplicates.
 
 ## Local login
 
@@ -56,7 +59,7 @@ With the development server running on port 3000, verify the session flow with:
 npm run session:verify
 ```
 
-## Workspace-scoped queue reads, claims, and release
+## Workspace-scoped queue reads, claims, release, and resolve
 
 Authenticated users can list only workspaces where they have a database-backed
 membership. Selecting one loads up to 50 newest `OPEN` items from that workspace,
@@ -74,9 +77,17 @@ Release clears both claim fields in one conditional `UPDATE ... RETURNING`, with
 item identity, workspace boundary, open state, claim ownership, membership, and
 role enforced by that statement.
 
-The queue waits for claim and release responses before changing the claimant. A
-`200` response displays the confirmed state, while a `409` immediately
-reconciles the row to the canonical item returned by the server.
+They may also resolve only their own claim on an `OPEN` item. Resolve uses a
+short Prisma interactive transaction: one conditional PostgreSQL mutation
+enforces Item identity, workspace boundary, state, claimant, membership, and
+role, then the same transaction client inserts one `PENDING`
+`NotificationDelivery`. If the insert fails, the Item mutation rolls back.
+
+The queue waits for claim, release, and resolve responses before changing a row.
+A `200` response displays the confirmed state, while a `409` immediately
+reconciles the row to the canonical item returned by the server. Successful
+resolve removes the Item from the OPEN queue and reports `Resolved. Notification
+queued.` without waiting for notification delivery.
 
 With the development server running on port 3000, verify the R2 read contracts
 and seeded visibility matrix with:
@@ -115,8 +126,61 @@ requests. It checks release ownership, repeated release, cross-workspace ID
 substitution, canonical unclaimed state, and direct database non-mutation for
 failed requests. Every touched item is restored to its original claim state.
 
-Resolve, notifications, pagination, and claim expiry are not included in this
-slice.
+## R3 notification delivery guarantee
+
+The implemented guarantee is **best-effort-with-a-record**.
+
+Resolve durably commits both the resolved Item and a `PENDING` delivery record,
+then returns without calling or waiting for `notify()`. A Supabase Database
+Webhook starts a separate serverless invocation. The internal worker reloads
+canonical delivery data by delivery ID, atomically acquires only
+`PENDING -> PROCESSING`, and makes one attempt. `notify()` waits about one second
+and fails on roughly 20% of calls. Success stores `SENT`; a normal notify failure
+stores `FAILED` with a short non-sensitive error value.
+
+There are no application retries:
+
+- `PENDING` may remain indefinitely if the database webhook never reaches the worker.
+- `PROCESSING` may remain indefinitely if the worker dies during the attempt.
+- `PROCESSING` is ambiguous if `notify()` performed its side effect but `SENT` could not be stored.
+- `FAILED` is terminal and is never changed back to `PENDING`.
+- Duplicate webhook calls cannot acquire `PROCESSING`, `SENT`, or `FAILED`, so they do not make another notification attempt.
+
+This is not guaranteed delivery and is not an exactly-once guarantee. The
+database row is the durable source of truth; the webhook is only a best-effort
+trigger.
+
+### Supabase Database Webhook setup
+
+Set the same private `NOTIFICATION_WEBHOOK_SECRET` in the Vercel deployment and
+the Supabase webhook configuration. Never prefix it with `NEXT_PUBLIC_`.
+
+In the Supabase Dashboard, create a Database Webhook with:
+
+- schema and table: `public.NotificationDelivery`
+- event: `INSERT` only
+- HTTP method: `POST`
+- destination: `https://<deployment>/api/internal/notifications/dispatch`
+- header: `Content-Type: application/json`
+- header: `x-notification-webhook-secret: <NOTIFICATION_WEBHOOK_SECRET>`
+
+Do not store the deployed URL or real secret in source code or a Prisma
+migration. Local verification does not require a configured remote webhook; it
+sends a representative Supabase INSERT payload directly to the internal worker.
+
+With the development server running and the same webhook secret available to
+both server and verifier, run:
+
+```powershell
+npm run r3:verify
+```
+
+The verifier uses real signed sessions and direct PostgreSQL assertions. It
+covers resolve roles and isolation, the Item-plus-delivery transaction result,
+secret and payload validation, one CAS acquisition, terminal `SENT | FAILED`,
+duplicate no-op behavior, safe failure storage, and fixture restoration.
+
+Pagination and claim expiry are not included in this slice.
 
 ## Verification
 
@@ -124,5 +188,9 @@ slice.
 npm run lint
 npm run typecheck
 npm run build
+npm run session:verify
+npm run r2:verify
+npm run r1:verify
 npm run release:verify
+npm run r3:verify
 ```

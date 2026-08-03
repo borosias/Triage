@@ -27,18 +27,40 @@ type QueueItem = {
   } | null;
 };
 
+type ItemActionItem =
+  | QueueItem
+  | (Omit<QueueItem, "status"> & { status: "RESOLVED" });
+
 type LoadState = "idle" | "loading" | "ready" | "error";
 
-type ItemAction = "claim" | "release";
+type ItemAction = "claim" | "release" | "resolve";
 
 type ItemActionResponse = {
   error?: string;
-  item?: QueueItem;
+  item?: ItemActionItem;
+};
+
+type QueueNotice = {
+  kind: "success" | "error";
+  message: string;
 };
 
 type WorkspaceQueueProps = {
   currentUser: CurrentUser | null;
 };
+
+export function reconcileQueueAfterItemAction(
+  items: QueueItem[],
+  canonicalItem: ItemActionItem,
+) {
+  if (canonicalItem.status === "RESOLVED") {
+    return items.filter((item) => item.id !== canonicalItem.id);
+  }
+
+  return items.map((item) =>
+    item.id === canonicalItem.id ? canonicalItem : item,
+  );
+}
 
 export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -50,10 +72,11 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
   const [queueState, setQueueState] = useState<LoadState>("idle");
   const [workspaceReload, setWorkspaceReload] = useState(0);
   const [queueReload, setQueueReload] = useState(0);
-  const [pendingItemIds, setPendingItemIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [pendingItemActions, setPendingItemActions] = useState<
+    Record<string, ItemAction>
+  >({});
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const [queueNotice, setQueueNotice] = useState<QueueNotice | null>(null);
 
   const currentUserId = currentUser?.id ?? null;
   const selectedWorkspace = workspaces.find(
@@ -75,8 +98,9 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
       setSelectedWorkspaceId(null);
       setItems([]);
       setQueueState("idle");
-      setPendingItemIds(new Set());
+      setPendingItemActions({});
       setActionErrors({});
+      setQueueNotice(null);
 
       try {
         const response = await fetch("/api/workspaces", {
@@ -116,8 +140,9 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
     async function loadItems() {
       setQueueState("loading");
       setItems([]);
-      setPendingItemIds(new Set());
+      setPendingItemActions({});
       setActionErrors({});
+      setQueueNotice(null);
 
       try {
         const response = await fetch(
@@ -147,13 +172,17 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
     return () => controller.abort();
   }, [queueReload, selectedWorkspaceId]);
 
-  async function updateItemClaim(item: QueueItem, action: ItemAction) {
-    setPendingItemIds((current) => new Set(current).add(item.id));
+  async function updateItem(item: QueueItem, action: ItemAction) {
+    setPendingItemActions((current) => ({
+      ...current,
+      [item.id]: action,
+    }));
     setActionErrors((current) => {
       const next = { ...current };
       delete next[item.id];
       return next;
     });
+    setQueueNotice(null);
 
     try {
       const response = await fetch(
@@ -166,20 +195,33 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
         const canonicalItem = body.item;
 
         setItems((current) =>
-          current.map((currentItem) =>
-            currentItem.id === canonicalItem.id ? canonicalItem : currentItem,
-          ),
+          reconcileQueueAfterItemAction(current, canonicalItem),
         );
 
+        if (response.status === 200 && action === "resolve") {
+          setQueueNotice({
+            kind: "success",
+            message: "Resolved. Notification queued.",
+          });
+        }
+
         if (response.status === 409) {
-          setActionErrors((current) => ({
-            ...current,
-            [item.id]:
-              body.error ??
-              (action === "claim"
-                ? "Another member claimed this item."
-                : "This item could not be released."),
-          }));
+          const errorMessage =
+            body.error ??
+            (action === "claim"
+              ? "Another member claimed this item."
+              : action === "release"
+                ? "This item could not be released."
+                : "This item could not be resolved.");
+
+          if (canonicalItem.status === "RESOLVED") {
+            setQueueNotice({ kind: "error", message: errorMessage });
+          } else {
+            setActionErrors((current) => ({
+              ...current,
+              [item.id]: errorMessage,
+            }));
+          }
         }
 
         return;
@@ -189,7 +231,9 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
         body.error ??
           (action === "claim"
             ? "Claim request failed."
-            : "Release request failed."),
+            : action === "release"
+              ? "Release request failed."
+              : "Resolve request failed."),
       );
     } catch (error) {
       setActionErrors((current) => ({
@@ -200,9 +244,9 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
             : `Could not ${action} this item. Try again.`,
       }));
     } finally {
-      setPendingItemIds((current) => {
-        const next = new Set(current);
-        next.delete(item.id);
+      setPendingItemActions((current) => {
+        const next = { ...current };
+        delete next[item.id];
         return next;
       });
     }
@@ -230,6 +274,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
             onChange={(event) => {
               setItems([]);
               setQueueState("loading");
+              setQueueNotice(null);
               setSelectedWorkspaceId(event.target.value);
             }}
           >
@@ -268,6 +313,19 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
         <p className="text-sm text-slate-600">No accessible workspaces.</p>
       ) : null}
 
+      {queueNotice ? (
+        <p
+          className={
+            queueNotice.kind === "success"
+              ? "text-sm text-emerald-700"
+              : "text-sm text-red-700"
+          }
+          role={queueNotice.kind === "success" ? "status" : "alert"}
+        >
+          {queueNotice.message}
+        </p>
+      ) : null}
+
       {queueState === "loading" ? (
         <p className="text-sm text-slate-600">Loading open queue...</p>
       ) : null}
@@ -303,53 +361,68 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => (
-                <tr key={item.id} className="border-b border-slate-100">
-                  <td className="px-2 py-2 text-slate-950">{item.title}</td>
-                  <td className="px-2 py-2 text-slate-700">
-                    {item.claimedBy
-                      ? `Claimed by ${item.claimedBy.name}`
-                      : "Unclaimed"}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-2 text-slate-600">
-                    {new Date(item.createdAt).toLocaleString()}
-                  </td>
-                  <td className="px-2 py-2 text-slate-700">
-                    {!canClaimItems ? (
-                      <span aria-hidden="true">&mdash;</span>
-                    ) : item.claimedById === currentUserId ? (
-                      <button
-                        className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
-                        type="button"
-                        disabled={pendingItemIds.has(item.id)}
-                        onClick={() =>
-                          void updateItemClaim(item, "release")
-                        }
-                      >
-                        {pendingItemIds.has(item.id)
-                          ? "Releasing..."
-                          : "Release"}
-                      </button>
-                    ) : item.claimedBy ? (
-                      <span aria-hidden="true">&mdash;</span>
-                    ) : (
-                      <button
-                        className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
-                        type="button"
-                        disabled={pendingItemIds.has(item.id)}
-                        onClick={() => void updateItemClaim(item, "claim")}
-                      >
-                        {pendingItemIds.has(item.id) ? "Claiming..." : "Claim"}
-                      </button>
-                    )}
-                    {actionErrors[item.id] ? (
-                      <p className="mt-1 text-xs text-red-700" role="alert">
-                        {actionErrors[item.id]}
-                      </p>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
+              {items.map((item) => {
+                const pendingAction = pendingItemActions[item.id];
+                const isPending = pendingAction !== undefined;
+
+                return (
+                  <tr key={item.id} className="border-b border-slate-100">
+                    <td className="px-2 py-2 text-slate-950">{item.title}</td>
+                    <td className="px-2 py-2 text-slate-700">
+                      {item.claimedBy
+                        ? `Claimed by ${item.claimedBy.name}`
+                        : "Unclaimed"}
+                    </td>
+                    <td className="whitespace-nowrap px-2 py-2 text-slate-600">
+                      {new Date(item.createdAt).toLocaleString()}
+                    </td>
+                    <td className="px-2 py-2 text-slate-700">
+                      {!canClaimItems ? (
+                        <span aria-hidden="true">&mdash;</span>
+                      ) : item.claimedById === currentUserId ? (
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
+                            type="button"
+                            disabled={isPending}
+                            onClick={() => void updateItem(item, "release")}
+                          >
+                            {pendingAction === "release"
+                              ? "Releasing..."
+                              : "Release"}
+                          </button>
+                          <button
+                            className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60"
+                            type="button"
+                            disabled={isPending}
+                            onClick={() => void updateItem(item, "resolve")}
+                          >
+                            {pendingAction === "resolve"
+                              ? "Resolving..."
+                              : "Resolve"}
+                          </button>
+                        </div>
+                      ) : item.claimedBy ? (
+                        <span aria-hidden="true">&mdash;</span>
+                      ) : (
+                        <button
+                          className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
+                          type="button"
+                          disabled={isPending}
+                          onClick={() => void updateItem(item, "claim")}
+                        >
+                          {pendingAction === "claim" ? "Claiming..." : "Claim"}
+                        </button>
+                      )}
+                      {actionErrors[item.id] ? (
+                        <p className="mt-1 text-xs text-red-700" role="alert">
+                          {actionErrors[item.id]}
+                        </p>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
