@@ -29,7 +29,9 @@ type QueueItem = {
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 
-type ClaimResponse = {
+type ItemAction = "claim" | "release";
+
+type ItemActionResponse = {
   error?: string;
   item?: QueueItem;
 };
@@ -51,7 +53,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
   const [pendingItemIds, setPendingItemIds] = useState<Set<string>>(
     () => new Set(),
   );
-  const [claimErrors, setClaimErrors] = useState<Record<string, string>>({});
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
 
   const currentUserId = currentUser?.id ?? null;
   const selectedWorkspace = workspaces.find(
@@ -74,7 +76,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
       setItems([]);
       setQueueState("idle");
       setPendingItemIds(new Set());
-      setClaimErrors({});
+      setActionErrors({});
 
       try {
         const response = await fetch("/api/workspaces", {
@@ -115,7 +117,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
       setQueueState("loading");
       setItems([]);
       setPendingItemIds(new Set());
-      setClaimErrors({});
+      setActionErrors({});
 
       try {
         const response = await fetch(
@@ -145,9 +147,9 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
     return () => controller.abort();
   }, [queueReload, selectedWorkspaceId]);
 
-  async function claimItem(item: QueueItem) {
+  async function updateItemClaim(item: QueueItem, action: ItemAction) {
     setPendingItemIds((current) => new Set(current).add(item.id));
-    setClaimErrors((current) => {
+    setActionErrors((current) => {
       const next = { ...current };
       delete next[item.id];
       return next;
@@ -155,10 +157,10 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
 
     try {
       const response = await fetch(
-        `/api/workspaces/${item.workspaceId}/items/${item.id}/claim`,
+        `/api/workspaces/${item.workspaceId}/items/${item.id}/${action}`,
         { method: "POST" },
       );
-      const body = (await response.json()) as ClaimResponse;
+      const body = (await response.json()) as ItemActionResponse;
 
       if ((response.status === 200 || response.status === 409) && body.item) {
         const canonicalItem = body.item;
@@ -170,23 +172,32 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
         );
 
         if (response.status === 409) {
-          setClaimErrors((current) => ({
+          setActionErrors((current) => ({
             ...current,
-            [item.id]: body.error ?? "Another member claimed this item.",
+            [item.id]:
+              body.error ??
+              (action === "claim"
+                ? "Another member claimed this item."
+                : "This item could not be released."),
           }));
         }
 
         return;
       }
 
-      throw new Error(body.error ?? "Claim request failed.");
+      throw new Error(
+        body.error ??
+          (action === "claim"
+            ? "Claim request failed."
+            : "Release request failed."),
+      );
     } catch (error) {
-      setClaimErrors((current) => ({
+      setActionErrors((current) => ({
         ...current,
         [item.id]:
           error instanceof Error
             ? error.message
-            : "Could not claim this item. Try again.",
+            : `Could not ${action} this item. Try again.`,
       }));
     } finally {
       setPendingItemIds((current) => {
@@ -304,21 +315,36 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
                     {new Date(item.createdAt).toLocaleString()}
                   </td>
                   <td className="px-2 py-2 text-slate-700">
-                    {item.claimedBy || !canClaimItems ? (
+                    {!canClaimItems ? (
+                      <span aria-hidden="true">&mdash;</span>
+                    ) : item.claimedById === currentUserId ? (
+                      <button
+                        className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
+                        type="button"
+                        disabled={pendingItemIds.has(item.id)}
+                        onClick={() =>
+                          void updateItemClaim(item, "release")
+                        }
+                      >
+                        {pendingItemIds.has(item.id)
+                          ? "Releasing..."
+                          : "Release"}
+                      </button>
+                    ) : item.claimedBy ? (
                       <span aria-hidden="true">&mdash;</span>
                     ) : (
                       <button
                         className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
                         type="button"
                         disabled={pendingItemIds.has(item.id)}
-                        onClick={() => void claimItem(item)}
+                        onClick={() => void updateItemClaim(item, "claim")}
                       >
                         {pendingItemIds.has(item.id) ? "Claiming..." : "Claim"}
                       </button>
                     )}
-                    {claimErrors[item.id] ? (
+                    {actionErrors[item.id] ? (
                       <p className="mt-1 text-xs text-red-700" role="alert">
-                        {claimErrors[item.id]}
+                        {actionErrors[item.id]}
                       </p>
                     ) : null}
                   </td>

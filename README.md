@@ -1,7 +1,7 @@
 # Flamingo
 
-Flamingo Home Assignment implementation with atomic item claiming and sealed
-workspace reads and claim writes.
+Flamingo Home Assignment implementation with atomic item claiming and release,
+plus sealed workspace reads and writes.
 
 ## Requirements
 
@@ -56,7 +56,7 @@ With the development server running on port 3000, verify the session flow with:
 npm run session:verify
 ```
 
-## Workspace-scoped queue reads and claims
+## Workspace-scoped queue reads, claims, and release
 
 Authenticated users can list only workspaces where they have a database-backed
 membership. Selecting one loads up to 50 newest `OPEN` items from that workspace,
@@ -69,9 +69,14 @@ and item IDs cannot cross workspace boundaries. Claiming uses one conditional
 PostgreSQL `UPDATE ... RETURNING`; the item, workspace, state, unclaimed check,
 membership, and write-capable role are all part of that mutation predicate.
 
-The queue waits for the claim response before changing the claimant. A `200`
-response displays the confirmed claimant, while a concurrent `409` immediately
-reconciles the row to the canonical claimant returned by the server.
+The same write-capable roles may release only their own claim on an `OPEN` item.
+Release clears both claim fields in one conditional `UPDATE ... RETURNING`, with
+item identity, workspace boundary, open state, claim ownership, membership, and
+role enforced by that statement.
+
+The queue waits for claim and release responses before changing the claimant. A
+`200` response displays the confirmed state, while a `409` immediately
+reconciles the row to the canonical item returned by the server.
 
 With the development server running on port 3000, verify the R2 read contracts
 and seeded visibility matrix with:
@@ -97,8 +102,21 @@ requests concurrently, and requires exactly one `200` and one `409`. It then
 checks that the conflict response names the winner and reads PostgreSQL directly
 to confirm the same claimant. The test item is restored afterward.
 
-Release, resolve, notifications, pagination, and claim expiry are not included
-in this slice.
+## Atomic release verification
+
+With the development server running on port 3000, run:
+
+```powershell
+npm run release:verify
+```
+
+The verifier uses real signed sessions for owner, member, viewer, and outsider
+requests. It checks release ownership, repeated release, cross-workspace ID
+substitution, canonical unclaimed state, and direct database non-mutation for
+failed requests. Every touched item is restored to its original claim state.
+
+Resolve, notifications, pagination, and claim expiry are not included in this
+slice.
 
 ## Verification
 
@@ -106,4 +124,5 @@ in this slice.
 npm run lint
 npm run typecheck
 npm run build
+npm run release:verify
 ```
