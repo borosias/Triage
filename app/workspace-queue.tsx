@@ -291,9 +291,10 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
 
   async function loadMore() {
     if (
-      !selectedWorkspaceId ||
-      !nextCursor ||
-      loadMoreState === "loading"
+        !selectedWorkspaceId ||
+        !nextCursor ||
+        loadMoreState === "loading" ||
+        pendingItemActionCount > 0
     ) {
       return;
     }
@@ -331,6 +332,10 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
   }
 
   async function updateItem(item: QueueItem, action: ItemAction) {
+    if (loadMoreState === "loading") {
+      return;
+    }
+
     queueGenerationRef.current += 1;
     setPendingItemActions((current) => ({
       ...current,
@@ -552,7 +557,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
                           <button
                             className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
                             type="button"
-                            disabled={isPending}
+                            disabled={isPending || loadMoreState === "loading"}
                             onClick={() => void updateItem(item, "release")}
                           >
                             {pendingAction === "release"
@@ -562,7 +567,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
                           <button
                             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60"
                             type="button"
-                            disabled={isPending}
+                            disabled={isPending || loadMoreState === "loading"}
                             onClick={() => void updateItem(item, "resolve")}
                           >
                             {pendingAction === "resolve"
@@ -576,7 +581,7 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
                         <button
                           className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
                           type="button"
-                          disabled={isPending}
+                          disabled={isPending || loadMoreState === "loading"}
                           onClick={() => void updateItem(item, "claim")}
                         >
                           {pendingAction === "claim" ? "Claiming..." : "Claim"}
@@ -601,7 +606,10 @@ export function WorkspaceQueue({ currentUser }: WorkspaceQueueProps) {
           <button
             className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 disabled:opacity-60"
             type="button"
-            disabled={loadMoreState === "loading"}
+            disabled={
+                loadMoreState === "loading" ||
+                pendingItemActionCount > 0
+            }
             onClick={() => void loadMore()}
           >
             {loadMoreState === "loading" ? "Loading more..." : "Load more"}

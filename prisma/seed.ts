@@ -27,8 +27,13 @@ try {
   );
 
   await client.query(`
-    TRUNCATE TABLE "Item", "WorkspaceMembership", "Workspace", "User"
-  `);
+  TRUNCATE TABLE
+    "NotificationDelivery",
+    "Item",
+    "WorkspaceMembership",
+    "Workspace",
+    "User"
+`);
 
   await client.query(`
     INSERT INTO "User" ("id", "name", "createdAt")
