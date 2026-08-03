@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "seed": "prisma db seed",
     "seed:verify": "tsx prisma/verify-seed.ts",
-    "session:verify": "node scripts/verify-session.mjs"
+    "session:verify": "node scripts/verify-session.mjs",
+    "r2:verify": "node scripts/verify-r2.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.9.1",

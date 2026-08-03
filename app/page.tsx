@@ -1,4 +1,5 @@
 import { UserSwitcher } from "@/app/user-switcher";
+import { WorkspaceQueue } from "@/app/workspace-queue";
 import { db } from "@/lib/db";
 import { getCurrentUser } from "@/lib/session";
 import { unstable_rethrow } from "next/navigation";
@@ -38,7 +39,7 @@ export default async function Home() {
 
   return (
     <main className="min-h-dvh bg-slate-50 p-6 font-sans">
-      <div className="mx-auto max-w-xl space-y-6 pt-16">
+      <div className="mx-auto max-w-5xl space-y-6 pt-16">
         <div>
           <h1 className="text-2xl font-semibold text-slate-950">Flamingo</h1>
           <p className="mt-1 text-sm text-slate-600">
@@ -47,6 +48,10 @@ export default async function Home() {
         </div>
 
         <UserSwitcher users={data.users} currentUser={data.currentUser} />
+        <WorkspaceQueue
+          key={data.currentUser?.id ?? "anonymous"}
+          currentUser={data.currentUser}
+        />
       </div>
     </main>
   );

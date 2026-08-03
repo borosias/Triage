@@ -47,14 +47,30 @@ fixtures instead of appending duplicates.
 Open the application and choose Alice, Bob, Carol, or Dana from the dropdown.
 The users come from the seeded `User` table. The selection creates an eight-hour
 signed, HttpOnly session cookie; use **Log out** to clear it. This is the
-assignment's intentionally fake login and does not implement real authentication
-or workspace authorization.
+assignment's intentionally fake login and does not implement real authentication.
 
 With the development server running on port 3000, verify the session flow with:
 
 ```powershell
 npm run session:verify
 ```
+
+## Workspace-scoped queue reads
+
+Authenticated users can list only workspaces where they have a database-backed
+membership. Selecting one loads up to 50 newest `OPEN` items from that workspace,
+including both claimed and unclaimed items. `OWNER`, `MEMBER`, and `VIEWER` can
+all read. A request for a workspace without membership returns `404`, and every
+item query includes the requested workspace ID in its database predicate.
+
+With the development server running on port 3000, verify the R2 read contracts
+and seeded visibility matrix with:
+
+```powershell
+npm run r2:verify
+```
+
+This slice does not add claim, release, resolve, or other write authorization.
 
 ## Verification
 
